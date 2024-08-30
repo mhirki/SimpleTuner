@@ -122,6 +122,7 @@ from helpers.models.flux import (
     unpack_latents,
     get_mobius_guidance,
 )
+from diffusers.pipelines.flux.pipeline_flux import calculate_shift as calculate_shift_flux
 
 is_optimi_available = False
 try:
@@ -1651,6 +1652,29 @@ def main():
                             args.flow_matching_sigmoid_scale
                             * torch.randn((bsz,), device=accelerator.device)
                         )
+                        flux_shift_value = None
+                        if (
+                            args.flux_schedule_shift is not None
+                            and args.flux_schedule_shift > 0
+                        ):
+                            flux_shift_value = args.flux_schedule_shift
+                        elif args.flux_schedule_auto_shift:
+                            image_seq_len = (noise.shape[-1] * noise.shape[-2]) // 4
+                            mu = calculate_shift_flux(
+                                (noise.shape[-1] * noise.shape[-2]) // 4,
+                                noise_scheduler.config.base_image_seq_len,
+                                noise_scheduler.config.max_image_seq_len,
+                                noise_scheduler.config.base_shift,
+                                noise_scheduler.config.max_shift,
+                            )
+                            training_logger.debug(
+                                f"image_seq_len = {image_seq_len}, mu = {mu}, noise.shape = {noise.shape}"
+                            )
+                            flux_shift_value = math.exp(mu)
+                        if flux_shift_value is not None:
+                            sigmas = (sigmas * flux_shift_value) / (
+                                1 + (flux_shift_value - 1) * sigmas
+                            )
                     else:
                         # fast schedule can only use these sigmas, and they can be sampled up to batch size times
                         available_sigmas = [
@@ -1670,13 +1694,6 @@ def main():
                             device=accelerator.device,
                         )
                     timesteps = sigmas * 1000.0
-                    if (
-                        args.flux_schedule_shift is not None
-                        and args.flux_schedule_shift > 0
-                    ):
-                        timesteps = (timesteps * args.flux_schedule_shift) / (
-                            1 + (args.flux_schedule_shift - 1) * timesteps
-                        )
                     sigmas = sigmas.view(-1, 1, 1, 1)
                 else:
                     # Sample a random timestep for each image, potentially biased by the timestep weights.
